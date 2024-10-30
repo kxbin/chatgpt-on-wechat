@@ -42,6 +42,8 @@ class Bridge(object):
                 self.btype["chat"] = const.ZHIPU_AI
             if model_type and model_type.startswith("claude-3"):
                 self.btype["chat"] = const.CLAUDEAPI
+            if model_type in [const.COZE]:                                                                                              
+                self.btype["chat"] = const.COZE
 
             if model_type in ["claude"]:
                 self.btype["chat"] = const.CLAUDEAI
