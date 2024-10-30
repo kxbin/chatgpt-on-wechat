@@ -25,6 +25,10 @@ from config import conf, get_appdata_dir
 from lib import itchat
 from lib.itchat.content import *
 
+from clickhouse_utils import ck_exec
+from datetime import datetime
+ys_user = "unknown"
+user_dict = {}
 
 @itchat.msg_register([TEXT, VOICE, PICTURE, NOTE, ATTACHMENT, SHARING])
 def handler_single_msg(msg):
@@ -50,6 +54,17 @@ def handler_group_msg(msg):
 
 def _check(func):
     def wrapper(self, cmsg: ChatMessage):
+        # ---开始插入ck
+        global ys_user
+        data = [
+            (ys_user, str(cmsg.from_user_id), str(cmsg.to_user_id), str(cmsg.content), datetime.now()),
+        ]
+        ck_exec('INSERT INTO wechat_log (ys_user, from_user_id, to_user_id, content, created) VALUES', data)
+        # ---结束插入ck
+
+        if cmsg.from_user_id in user_dict and int(cmsg.create_time) - user_dict[cmsg.from_user_id] < 300:
+            logger.info("人工客服正在接待中，不对此消息进行AI回复")
+            return
         msgId = cmsg.msg_id
         if msgId in self.receivedMsgs:
             logger.info("Wechat message {} already received, ignore".format(msgId))
@@ -59,54 +74,16 @@ def _check(func):
         if conf().get("hot_reload") == True and int(create_time) < int(time.time()) - 60:  # 跳过1分钟前的历史消息
             logger.debug("[WX]history message {} skipped".format(msgId))
             return
-        if cmsg.my_msg and not cmsg.is_group:
+        if cmsg.my_msg:
+            logger.info("触发人工客服介入")
             logger.debug("[WX]my message {} skipped".format(msgId))
+            user_dict[cmsg.to_user_id] = int(cmsg.create_time)
             return
         return func(self, cmsg)
 
     return wrapper
 
 
-# 可用的二维码生成接口
-# https://api.qrserver.com/v1/create-qr-code/?size=400×400&data=https://www.abc.com
-# https://api.isoyu.com/qr/?m=1&e=L&p=20&url=https://www.abc.com
-def qrCallback(uuid, status, qrcode):
-    # logger.debug("qrCallback: {} {}".format(uuid,status))
-    if status == "0":
-        try:
-            from PIL import Image
-
-            img = Image.open(io.BytesIO(qrcode))
-            _thread = threading.Thread(target=img.show, args=("QRCode",))
-            _thread.setDaemon(True)
-            _thread.start()
-        except Exception as e:
-            pass
-
-        import qrcode
-
-        url = f"https://login.weixin.qq.com/l/{uuid}"
-
-        qr_api1 = "https://api.isoyu.com/qr/?m=1&e=L&p=20&url={}".format(url)
-        qr_api2 = "https://api.qrserver.com/v1/create-qr-code/?size=400×400&data={}".format(url)
-        qr_api3 = "https://api.pwmqr.com/qrcode/create/?url={}".format(url)
-        qr_api4 = "https://my.tv.sohu.com/user/a/wvideo/getQRCode.do?text={}".format(url)
-        print("You can also scan QRCode in any website below:")
-        print(qr_api3)
-        print(qr_api4)
-        print(qr_api2)
-        print(qr_api1)
-        _send_qr_code([qr_api3, qr_api4, qr_api2, qr_api1])
-        qr = qrcode.QRCode(border=1)
-        qr.add_data(url)
-        qr.make(fit=True)
-        try:
-            qr.print_ascii(invert=True)
-        except UnicodeEncodeError:
-            print("ASCII QR code printing failed due to encoding issues.")
-
-
-@singleton
 class WechatChannel(ChatChannel):
     NOT_SUPPORT_REPLYTYPE = []
 
@@ -115,7 +92,22 @@ class WechatChannel(ChatChannel):
         self.receivedMsgs = ExpiredDict(conf().get("expires_in_seconds", 3600))
         self.auto_login_times = 0
 
-    def startup(self):
+    def heartbeat(self):
+        # ---开始插入ck
+        while True:
+            global ys_user
+            data = [
+                (ys_user, datetime.now()),
+            ]
+            ck_exec('INSERT INTO heartbeat_log (ys_user, created) VALUES', data)
+            time.sleep(300)
+        # ---结束插入ck
+
+    def startup(self, queue, event, _ys_user):
+        self.queue = queue
+        self.event = event
+        global ys_user
+        ys_user = _ys_user
         try:
             itchat.instance.receivingRetryCount = 600  # 修改断线超时时间
             # login by scan QRCode
@@ -125,17 +117,56 @@ class WechatChannel(ChatChannel):
                 enableCmdQR=2,
                 hotReload=hotReload,
                 statusStorageDir=status_path,
-                qrCallback=qrCallback,
+                qrCallback=self.qrCallback,
                 exitCallback=self.exitCallback,
                 loginCallback=self.loginCallback
             )
             self.user_id = itchat.instance.storageClass.userName
             self.name = itchat.instance.storageClass.nickName
             logger.info("Wechat login success, user_id: {}, nickname: {}".format(self.user_id, self.name))
+            threading.Thread(target=self.heartbeat, daemon=True).start()
             # start message listener
             itchat.run()
         except Exception as e:
             logger.exception(e)
+
+    # 可用的二维码生成接口
+    # https://api.qrserver.com/v1/create-qr-code/?size=400×400&data=https://www.abc.com
+    # https://api.isoyu.com/qr/?m=1&e=L&p=20&url=https://www.abc.com
+    def qrCallback(self, uuid, status, qrcode):
+        # logger.debug("qrCallback: {} {}".format(uuid,status))
+        if status == "0":
+            try:
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(qrcode))
+                _thread = threading.Thread(target=img.show, args=("QRCode",))
+                _thread.setDaemon(True)
+                _thread.start()
+            except Exception as e:
+                pass
+
+            import qrcode
+
+            url = f"https://login.weixin.qq.com/l/{uuid}"
+
+            qr_api1 = "https://api.isoyu.com/qr/?m=1&e=L&p=20&url={}".format(url)
+            qr_api2 = "https://api.qrserver.com/v1/create-qr-code/?size=400×400&data={}".format(url)
+            qr_api3 = "https://api.pwmqr.com/qrcode/create/?url={}".format(url)
+            qr_api4 = "https://my.tv.sohu.com/user/a/wvideo/getQRCode.do?text={}".format(url)
+            print("You can also scan QRCode in any website below:")
+            print(qr_api3)
+            print(qr_api4)
+            print(qr_api2)
+            print(qr_api1)
+            _send_qr_code(self.queue, self.event, [qr_api3, qr_api4, qr_api2, qr_api1])
+            qr = qrcode.QRCode(border=1)
+            qr.add_data(url)
+            qr.make(fit=True)
+            try:
+                qr.print_ascii(invert=True)
+            except UnicodeEncodeError:
+                print("ASCII QR code printing failed due to encoding issues.")
 
     def exitCallback(self):
         try:
@@ -212,6 +243,15 @@ class WechatChannel(ChatChannel):
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
     def send(self, reply: Reply, context: Context):
         receiver = context["receiver"]
+
+        # ---开始插入ck
+        global ys_user
+        data = [
+            (ys_user, "coze_bot", str(receiver), str(reply.content), datetime.now()),
+        ]
+        ck_exec('INSERT INTO wechat_log (ys_user, from_user_id, to_user_id, content, created) VALUES', data)
+        # ---结束插入ck
+        
         if reply.type == ReplyType.TEXT:
             reply.content = remove_markdown_symbol(reply.content)
             itchat.send(reply.content, toUserName=receiver)
@@ -287,7 +327,9 @@ def _send_logout():
         pass
 
 
-def _send_qr_code(qrcode_list: list):
+def _send_qr_code(queue, event, qrcode_list: list):
+    queue.put(qrcode_list)
+    event.set()
     try:
         from common.linkai_client import chat_client
         if chat_client.client_id:

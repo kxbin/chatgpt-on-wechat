@@ -9,8 +9,7 @@ from channel import channel_factory
 from common import const
 from config import load_config
 from plugins import *
-import threading
-
+import threading,hashlib,multiprocessing
 
 def sigterm_handler_wrap(_signo):
     old_handler = signal.getsignal(_signo)
@@ -25,7 +24,7 @@ def sigterm_handler_wrap(_signo):
     signal.signal(_signo, func)
 
 
-def start_channel(channel_name: str):
+def start_channel(channel_name: str, queue, event, ys_user):
     channel = channel_factory.create_channel(channel_name)
     if channel_name in ["wx", "wxy", "terminal", "wechatmp", "wechatmp_service", "wechatcom_app", "wework",
                         const.FEISHU, const.DINGTALK]:
@@ -37,10 +36,10 @@ def start_channel(channel_name: str):
             threading.Thread(target=linkai_client.start, args=(channel,)).start()
         except Exception as e:
             pass
-    channel.startup()
+    channel.startup(queue, event, ys_user)
 
 
-def run():
+def run(queue, event, ys_user):
     try:
         # load config
         load_config()
@@ -58,7 +57,7 @@ def run():
         if channel_name == "wxy":
             os.environ["WECHATY_LOG"] = "warn"
 
-        start_channel(channel_name)
+        start_channel(channel_name, queue, event, ys_user)
 
         while True:
             time.sleep(1)
@@ -68,4 +67,6 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    queue = multiprocessing.Queue()                                                                                                     
+    event = multiprocessing.Event()
+    run(queue, event, 'unknown')
