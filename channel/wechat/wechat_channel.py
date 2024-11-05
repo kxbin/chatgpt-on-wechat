@@ -238,7 +238,8 @@ class WechatChannel(ChatChannel):
             logger.debug("[WX]receive group msg: {}".format(cmsg.content))
         context = self._compose_context(cmsg.ctype, cmsg.content, isgroup=True, msg=cmsg, no_need_at=conf().get("no_need_at", False))
         if context:
-            self.produce(context)
+            logger.info("收到群消息先等60s，如果60s后没有任何人回复，则AI回复")
+            threading.Thread(target=self.group_produce, args=(cmsg.from_user_id, cmsg.actual_user_nickname, context, ), daemon=True).start()
 
     # 统一的发送函数，每个Channel自行实现，根据reply的type字段发送不同类型的消息
     def send(self, reply: Reply, context: Context):

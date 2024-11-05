@@ -319,6 +319,28 @@ class ChatChannel(Channel):
 
         return func
 
+    our_username = [r"亿速云"]
+    group_context = {}
+    group_reply_time = {}
+    def group_produce(self, group_id, username, context: Context):
+        self.group_context[group_id] = context
+        for reg in self.our_username:
+            if re.match(reg, username):
+                self.group_reply_time[group_id] = time.time()
+
+        # 每秒检查持续60s，如5分钟内有公司自己人回复或有最新提问，则不进行AI回复
+        now = time.time()
+        end = now + 60
+        while now < end:
+            time.sleep(1)
+            now = time.time()
+            if group_id in self.group_reply_time and now < (self.group_reply_time[group_id] + 300):
+                return
+            if self.group_context[group_id] != context:
+                return
+        
+        self.produce(context)
+
     def produce(self, context: Context):
         session_id = context["session_id"]
         with self.lock:
